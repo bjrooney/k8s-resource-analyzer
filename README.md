@@ -280,6 +280,52 @@ unset OPENAI_API_KEY
 ./k8s-analyzer
 ```
 
+## CI/CD
+
+This project uses GitHub Actions for continuous integration and release automation.
+
+### Build and Test Workflow
+
+The `build-test.yml` workflow runs automatically on:
+- Push to `main`, `master`, or `develop` branches
+- Pull requests to `main`, `master`, or `develop` branches
+
+**Platforms built:**
+- Windows (amd64)
+- Linux (amd64, arm64, arm)
+- macOS Intel (amd64)
+- macOS Apple Silicon (arm64) - M1/M2/M3/M4
+
+Build artifacts are uploaded and retained for 7 days.
+
+### Release Workflow
+
+The `release.yml` workflow runs automatically when you push a version tag (e.g., `v1.0.0`).
+
+**To create a release:**
+
+```bash
+# Tag the current commit
+git tag -a v1.0.0 -m "Release version 1.0.0"
+
+# Push the tag to GitHub
+git push origin v1.0.0
+```
+
+This will:
+1. Build binaries for all supported platforms
+2. Generate SHA256 checksums for each binary
+3. Create a GitHub release with all binaries and checksums attached
+
+**Downloaded binaries can be verified:**
+
+```bash
+# Download binary and checksum
+# Then verify:
+sha256sum -c k8s-analyzer-linux-amd64.sha256
+```
+```
+
 ## Troubleshooting
 
 ### "Error building kubeconfig"
