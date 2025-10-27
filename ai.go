@@ -11,6 +11,7 @@ import (
 type AIClient struct {
 	client   *openai.Client
 	provider string
+	model    string
 }
 
 type AIInsights struct {
@@ -20,7 +21,7 @@ type AIInsights struct {
 	AutomationSuggestions   []string
 }
 
-func NewAIClient(apiKey, provider, endpoint string) (*AIClient, error) {
+func NewAIClient(apiKey, provider, endpoint, model string) (*AIClient, error) {
 	var client *openai.Client
 
 	if provider == "azure" && endpoint != "" {
@@ -30,9 +31,15 @@ func NewAIClient(apiKey, provider, endpoint string) (*AIClient, error) {
 		client = openai.NewClient(apiKey)
 	}
 
+	// Default to gpt-4o if no model specified
+	if model == "" {
+		model = "gpt-4o"
+	}
+
 	return &AIClient{
 		client:   client,
 		provider: provider,
+		model:    model,
 	}, nil
 }
 
@@ -44,7 +51,7 @@ func (ai *AIClient) AnalyzeCluster(ctx context.Context, data *ClusterData, analy
 	resp, err := ai.client.CreateChatCompletion(
 		ctx,
 		openai.ChatCompletionRequest{
-			Model: openai.GPT4,
+			Model: ai.model, // Use configured model
 			Messages: []openai.ChatCompletionMessage{
 				{
 					Role:    openai.ChatMessageRoleSystem,

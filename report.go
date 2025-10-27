@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -25,6 +26,9 @@ func GenerateReport(data *ClusterData, analysis *Analysis) string {
 
 	// Node Analysis
 	sb.WriteString(generateNodeAnalysisSection(analysis))
+
+	// Pod Restarts Analysis
+	sb.WriteString(generatePodRestartsSection(analysis))
 
 	// RabbitMQ Stability
 	sb.WriteString(generateRabbitMQSection(analysis))
@@ -64,6 +68,8 @@ func generateHealthSection(data *ClusterData, analysis *Analysis) string {
 	sb.WriteString(fmt.Sprintf("| Total Nodes | %d |\n", len(data.Nodes)))
 	sb.WriteString(fmt.Sprintf("| Pods Missing Resources | %d |\n", len(analysis.ResourceGaps)))
 	sb.WriteString(fmt.Sprintf("| OOM Events (Recent) | %d |\n", len(analysis.OOMEvents)))
+	sb.WriteString(fmt.Sprintf("| Pods with Restarts (24h) | %d |\n", analysis.PodRestarts.TotalPods24h))
+	sb.WriteString(fmt.Sprintf("| Pods with Restarts (7d) | %d |\n", analysis.PodRestarts.TotalPods7d))
 	sb.WriteString(fmt.Sprintf("| Node Issues | %d |\n", len(analysis.NodeIssues)))
 	sb.WriteString(fmt.Sprintf("| Namespaces at Risk | %d |\n\n", countHighRiskNamespaces(analysis.NamespaceAnalysis)))
 
@@ -361,10 +367,179 @@ func generateRabbitMQSection(analysis *Analysis) string {
 	return sb.String()
 }
 
+func generatePodRestartsSection(analysis *Analysis) string {
+	var sb strings.Builder
+
+	sb.WriteString("## 5. Pod Restart Analysis\n\n")
+
+	total24h := analysis.PodRestarts.TotalPods24h
+	total7d := analysis.PodRestarts.TotalPods7d
+
+	if total24h == 0 && total7d == 0 {
+		sb.WriteString("✅ No pod restarts detected in the last 7 days.\n\n")
+		return sb.String()
+	}
+
+	// Summary
+	sb.WriteString("### Summary\n\n")
+	sb.WriteString(fmt.Sprintf("- **Last 24 Hours**: %d pods with restarts (%d total restarts)\n",
+		total24h, len(analysis.PodRestarts.Last24Hours)))
+	sb.WriteString(fmt.Sprintf("- **Last 7 Days**: %d pods with restarts (%d total restarts)\n\n",
+		total7d, len(analysis.PodRestarts.Last7Days)))
+
+	// Last 24 Hours
+	if len(analysis.PodRestarts.Last24Hours) > 0 {
+		sb.WriteString("### Restarts in Last 24 Hours\n\n")
+
+		if len(analysis.PodRestarts.Last24Hours) > 20 {
+			sb.WriteString(fmt.Sprintf("Showing top 20 of %d containers with restarts:\n\n",
+				len(analysis.PodRestarts.Last24Hours)))
+		}
+
+		sb.WriteString("| Namespace | Pod | Container | Restart Count | Last Restart | Reason |\n")
+		sb.WriteString("|-----------|-----|-----------|---------------|--------------|--------|\n")
+
+		for i, restart := range analysis.PodRestarts.Last24Hours {
+			if i >= 20 {
+				sb.WriteString(fmt.Sprintf("\n_... and %d more containers with restarts_\n\n",
+					len(analysis.PodRestarts.Last24Hours)-20))
+				break
+			}
+
+			timeStr := "Unknown"
+			if !restart.LastRestartTime.IsZero() {
+				timeStr = restart.LastRestartTime.Format("2006-01-02 15:04")
+			}
+
+			sb.WriteString(fmt.Sprintf("| %s | %s | %s | %d | %s | %s |\n",
+				restart.Namespace,
+				restart.PodName,
+				restart.ContainerName,
+				restart.RestartCount,
+				timeStr,
+				restart.Reason))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Last 7 Days (excluding 24h ones already shown)
+	if len(analysis.PodRestarts.Last7Days) > len(analysis.PodRestarts.Last24Hours) {
+		sb.WriteString("### Additional Restarts in Last 7 Days (excluding above)\n\n")
+
+		// Create map of 24h restarts to exclude
+		recent := make(map[string]bool)
+		for _, r := range analysis.PodRestarts.Last24Hours {
+			recent[r.Namespace+"/"+r.PodName+"/"+r.ContainerName] = true
+		}
+
+		// Filter out recent ones
+		older := []PodRestart{}
+		for _, r := range analysis.PodRestarts.Last7Days {
+			key := r.Namespace + "/" + r.PodName + "/" + r.ContainerName
+			if !recent[key] {
+				older = append(older, r)
+			}
+		}
+
+		if len(older) > 0 {
+			if len(older) > 20 {
+				sb.WriteString(fmt.Sprintf("Showing top 20 of %d containers:\n\n", len(older)))
+			}
+
+			sb.WriteString("| Namespace | Pod | Container | Restart Count | Last Restart | Reason |\n")
+			sb.WriteString("|-----------|-----|-----------|---------------|--------------|--------|\n")
+
+			for i, restart := range older {
+				if i >= 20 {
+					sb.WriteString(fmt.Sprintf("\n_... and %d more containers_\n\n", len(older)-20))
+					break
+				}
+
+				timeStr := "Unknown"
+				if !restart.LastRestartTime.IsZero() {
+					timeStr = restart.LastRestartTime.Format("2006-01-02 15:04")
+				}
+
+				sb.WriteString(fmt.Sprintf("| %s | %s | %s | %d | %s | %s |\n",
+					restart.Namespace,
+					restart.PodName,
+					restart.ContainerName,
+					restart.RestartCount,
+					timeStr,
+					restart.Reason))
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	// Analysis and recommendations
+	sb.WriteString("### Analysis\n\n")
+
+	if total24h > 10 {
+		sb.WriteString("⚠️ **High Restart Rate**: Significant number of pod restarts in the last 24 hours.\n\n")
+	}
+
+	sb.WriteString("**Common Restart Reasons**:\n")
+
+	// Count reasons
+	reasonCount := make(map[string]int)
+	for _, r := range analysis.PodRestarts.Last7Days {
+		if r.Reason != "" && r.Reason != "Unknown" {
+			reasonCount[r.Reason]++
+		}
+	}
+
+	if len(reasonCount) > 0 {
+		type reasonPair struct {
+			reason string
+			count  int
+		}
+		reasons := []reasonPair{}
+		for r, c := range reasonCount {
+			reasons = append(reasons, reasonPair{r, c})
+		}
+		sort.Slice(reasons, func(i, j int) bool {
+			return reasons[i].count > reasons[j].count
+		})
+
+		for i, rp := range reasons {
+			if i >= 5 {
+				break
+			}
+			sb.WriteString(fmt.Sprintf("- **%s**: %d occurrences\n", rp.reason, rp.count))
+		}
+		sb.WriteString("\n")
+	} else {
+		sb.WriteString("- Most restarts have unknown/unspecified reasons\n\n")
+	}
+
+	sb.WriteString("### Recommendations\n\n")
+	sb.WriteString("1. **Investigate High Restart Pods**:\n")
+	sb.WriteString("   - Review logs: `kubectl logs <pod-name> --previous -n <namespace>`\n")
+	sb.WriteString("   - Check events: `kubectl describe pod <pod-name> -n <namespace>`\n\n")
+
+	sb.WriteString("2. **Address Common Issues**:\n")
+	sb.WriteString("   - **OOMKilled**: Increase memory limits\n")
+	sb.WriteString("   - **Error**: Check application logs for errors\n")
+	sb.WriteString("   - **CrashLoopBackOff**: Fix application startup issues\n")
+	sb.WriteString("   - **Liveness probe failures**: Adjust probe timing or fix health checks\n\n")
+
+	sb.WriteString("3. **Set Proper Resource Limits**:\n")
+	sb.WriteString("   - Ensure memory and CPU limits are appropriate\n")
+	sb.WriteString("   - Use VPA to get right-sizing recommendations\n\n")
+
+	sb.WriteString("4. **Implement Monitoring**:\n")
+	sb.WriteString("   - Set up alerts for high restart rates\n")
+	sb.WriteString("   - Track restart trends over time\n")
+	sb.WriteString("   - Monitor resource usage patterns\n\n")
+
+	return sb.String()
+}
+
 func generateNamespaceAnalysisSection(analysis *Analysis) string {
 	var sb strings.Builder
 
-	sb.WriteString("## 6. Namespace-by-Namespace Analysis\n\n")
+	sb.WriteString("## 7. Namespace-by-Namespace Analysis\n\n")
 
 	if len(analysis.NamespaceAnalysis) == 0 {
 		sb.WriteString("ℹ️ No application namespaces found (looking for 3-letter codes).\n\n")
@@ -495,7 +670,7 @@ func generateNamespaceDetail(ns NamespaceAnalysis) string {
 func generateAIInsightsSection(insights *AIInsights) string {
 	var sb strings.Builder
 
-	sb.WriteString("## 7. AI-Enhanced Insights\n\n")
+	sb.WriteString("## 8. AI-Enhanced Insights\n\n")
 	sb.WriteString(insights.Summary)
 	sb.WriteString("\n\n")
 

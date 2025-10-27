@@ -25,6 +25,7 @@ func main() {
 	outputFile := flag.String("output", "cluster-analysis-report.md", "output file path for the analysis report")
 	aiProvider := flag.String("ai-provider", "openai", "AI provider (openai or azure)")
 	aiEndpoint := flag.String("ai-endpoint", "", "AI endpoint URL (for Azure OpenAI)")
+	aiModel := flag.String("ai-model", "gpt-4o", "AI model to use (gpt-4o, gpt-4o-mini, gpt-4-turbo, etc.)")
 	flag.Parse()
 
 	// Build kubernetes client
@@ -69,7 +70,7 @@ func main() {
 	var aiClient *AIClient
 	if apiKey != "" {
 		fmt.Println("🤖 Initializing AI analysis...")
-		aiClient, err = NewAIClient(apiKey, *aiProvider, *aiEndpoint)
+		aiClient, err = NewAIClient(apiKey, *aiProvider, *aiEndpoint, *aiModel)
 		if err != nil {
 			log.Printf("Warning: Could not initialize AI client: %v", err)
 		}

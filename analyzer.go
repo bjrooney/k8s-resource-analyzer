@@ -59,6 +59,7 @@ type Analysis struct {
 	NamespaceAnalysis []NamespaceAnalysis
 	RabbitMQFindings  RabbitMQAnalysis
 	ShortLivedJobs    JobAnalysis
+	PodRestarts       PodRestartAnalysis
 	AIInsights        *AIInsights
 }
 
@@ -92,6 +93,22 @@ type JobAnalysis struct {
 	TotalJobs         int
 	ImpactOnStability string
 	Recommendations   []string
+}
+
+type PodRestart struct {
+	Namespace       string
+	PodName         string
+	ContainerName   string
+	RestartCount    int32
+	LastRestartTime time.Time
+	Reason          string
+}
+
+type PodRestartAnalysis struct {
+	Last24Hours  []PodRestart
+	Last7Days    []PodRestart
+	TotalPods24h int
+	TotalPods7d  int
 }
 
 func NewAnalyzer(clientset *kubernetes.Clientset) *Analyzer {
@@ -153,11 +170,98 @@ func (a *Analyzer) AnalyzeCluster(data *ClusterData) *Analysis {
 	// Analyze short-lived jobs
 	analysis.ShortLivedJobs = a.analyzeJobs(data.Pods)
 
+	// Analyze pod restarts
+	analysis.PodRestarts = a.analyzePodRestarts(data.Pods)
+
 	// Generate cluster health summary
 	analysis.ClusterHealth = a.generateHealthSummary(analysis)
 
 	// Generate critical issues
 	analysis.CriticalIssues = a.generateCriticalIssues(analysis)
+
+	return analysis
+}
+
+func (a *Analyzer) analyzePodRestarts(pods []corev1.Pod) PodRestartAnalysis {
+	analysis := PodRestartAnalysis{
+		Last24Hours: []PodRestart{},
+		Last7Days:   []PodRestart{},
+	}
+
+	now := time.Now()
+	threshold24h := now.Add(-24 * time.Hour)
+	threshold7d := now.Add(-7 * 24 * time.Hour)
+
+	for _, pod := range pods {
+		for _, containerStatus := range pod.Status.ContainerStatuses {
+			if containerStatus.RestartCount > 0 {
+				var lastRestartTime time.Time
+				var reason string
+
+				// Get last restart time and reason
+				if containerStatus.LastTerminationState.Terminated != nil {
+					lastRestartTime = containerStatus.LastTerminationState.Terminated.FinishedAt.Time
+					reason = containerStatus.LastTerminationState.Terminated.Reason
+					if reason == "" {
+						reason = "Unknown"
+					}
+				} else if containerStatus.State.Terminated != nil {
+					lastRestartTime = containerStatus.State.Terminated.FinishedAt.Time
+					reason = containerStatus.State.Terminated.Reason
+					if reason == "" {
+						reason = "Unknown"
+					}
+				} else {
+					// If we can't determine exact time, use pod start time as estimate
+					if pod.Status.StartTime != nil {
+						lastRestartTime = pod.Status.StartTime.Time
+					}
+					reason = "Unknown"
+				}
+
+				restart := PodRestart{
+					Namespace:       pod.Namespace,
+					PodName:         pod.Name,
+					ContainerName:   containerStatus.Name,
+					RestartCount:    containerStatus.RestartCount,
+					LastRestartTime: lastRestartTime,
+					Reason:          reason,
+				}
+
+				// Add to 24h list if within last 24 hours
+				if !lastRestartTime.IsZero() && lastRestartTime.After(threshold24h) {
+					analysis.Last24Hours = append(analysis.Last24Hours, restart)
+				}
+
+				// Add to 7d list if within last 7 days
+				if !lastRestartTime.IsZero() && lastRestartTime.After(threshold7d) {
+					analysis.Last7Days = append(analysis.Last7Days, restart)
+				}
+			}
+		}
+	}
+
+	// Sort by restart count (highest first)
+	sort.Slice(analysis.Last24Hours, func(i, j int) bool {
+		return analysis.Last24Hours[i].RestartCount > analysis.Last24Hours[j].RestartCount
+	})
+
+	sort.Slice(analysis.Last7Days, func(i, j int) bool {
+		return analysis.Last7Days[i].RestartCount > analysis.Last7Days[j].RestartCount
+	})
+
+	// Count unique pods
+	uniquePods24h := make(map[string]bool)
+	for _, r := range analysis.Last24Hours {
+		uniquePods24h[r.Namespace+"/"+r.PodName] = true
+	}
+	analysis.TotalPods24h = len(uniquePods24h)
+
+	uniquePods7d := make(map[string]bool)
+	for _, r := range analysis.Last7Days {
+		uniquePods7d[r.Namespace+"/"+r.PodName] = true
+	}
+	analysis.TotalPods7d = len(uniquePods7d)
 
 	return analysis
 }

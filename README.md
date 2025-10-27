@@ -93,6 +93,8 @@ This will:
 - `-output`: Output file path (default: `cluster-analysis-report.md`)
 - `-ai-provider`: AI provider to use: `openai` or `azure` (default: `openai`)
 - `-ai-endpoint`: Azure OpenAI endpoint URL (required if using Azure)
+- `-ai-model`: AI model to use (default: `gpt-4o`)
+  - Available: `gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo`, `gpt-3.5-turbo`
 
 ### Examples
 
@@ -101,10 +103,16 @@ This will:
 ./k8s-analyzer
 ```
 
-**With OpenAI integration:**
+**With OpenAI (default GPT-4o):**
 ```bash
 export OPENAI_API_KEY="sk-..."
-./k8s-analyzer -output=prod-cluster-report.md
+./k8s-analyzer
+```
+
+**With GPT-4o-mini (faster/cheaper):**
+```bash
+export OPENAI_API_KEY="sk-..."
+./k8s-analyzer -ai-model=gpt-4o-mini
 ```
 
 **With Azure OpenAI:**
@@ -124,9 +132,10 @@ The generated report includes:
 2. **Critical Issues**: Top 3-5 most critical problems with actionable recommendations
 3. **Resource Management**: Analysis of missing requests/limits and their impact
 4. **Node Analysis**: Node utilization, OOM events, and autoscaling recommendations
-5. **RabbitMQ Stability**: Specific recommendations for RabbitMQ workload protection
-6. **Namespace Analysis**: Detailed per-namespace breakdown with risk levels
-7. **AI Insights** (if enabled): AI-generated recommendations and strategic insights
+5. **Pod Restart Analysis**: Pods with restarts in last 24 hours and 7 days
+6. **RabbitMQ Stability**: Specific recommendations for RabbitMQ workload protection
+7. **Namespace Analysis**: Detailed per-namespace breakdown with risk levels
+8. **AI Insights** (if enabled): AI-generated recommendations and strategic insights
 
 ## What the Tool Analyzes
 
