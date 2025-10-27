@@ -1,0 +1,28 @@
+# Binaries
+k8s-analyzer
+k8s-resource-analyzer
+
+# Reports
+*.md
+!README.md
+
+# IDE
+.vscode/
+.idea/
+
+# Environment variables
+.env
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# OS
+.DS_Store
+Thumbs.db
