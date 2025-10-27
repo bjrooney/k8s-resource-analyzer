@@ -324,7 +324,6 @@ This will:
 # Then verify:
 sha256sum -c k8s-analyzer-linux-amd64.sha256
 ```
-```
 
 ## Troubleshooting
 
