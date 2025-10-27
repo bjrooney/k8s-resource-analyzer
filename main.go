@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/dynamic"
@@ -96,12 +98,47 @@ func main() {
 			analysis.AIInsights = aiInsights
 		}
 
-		// Generate AI resource suggestions for specific namespaces
-		fmt.Println("🎯 Generating AI resource suggestions for key namespaces (cgh, velero)...")
+		// Generate AI resource suggestions for ALL namespaces with missing resources
+		fmt.Println("🎯 Generating AI resource suggestions for all namespaces with missing resources...")
 		data.AISuggestions = make(map[string]map[string]ResourceSuggestion)
 
-		targetNamespaces := []string{"cgh", "velero"}
-		for _, ns := range targetNamespaces {
+		// Find all namespaces that have pods with missing resources
+		namespacesWithMissingResources := make(map[string]bool)
+		for _, pod := range data.Pods {
+			if pod.Status.Phase != corev1.PodRunning {
+				continue
+			}
+			for _, container := range pod.Spec.Containers {
+				hasMissingResources := false
+				if container.Resources.Requests == nil {
+					hasMissingResources = true
+				} else if container.Resources.Limits == nil {
+					hasMissingResources = true
+				} else {
+					if _, ok := container.Resources.Requests[corev1.ResourceCPU]; !ok {
+						hasMissingResources = true
+					}
+					if _, ok := container.Resources.Requests[corev1.ResourceMemory]; !ok {
+						hasMissingResources = true
+					}
+					if _, ok := container.Resources.Limits[corev1.ResourceCPU]; !ok {
+						hasMissingResources = true
+					}
+					if _, ok := container.Resources.Limits[corev1.ResourceMemory]; !ok {
+						hasMissingResources = true
+					}
+				}
+				if hasMissingResources {
+					namespacesWithMissingResources[pod.Namespace] = true
+					break
+				}
+			}
+		}
+
+		fmt.Printf("   Found %d namespaces with missing resource configurations\n", len(namespacesWithMissingResources))
+
+		// Generate suggestions for each namespace
+		for ns := range namespacesWithMissingResources {
 			suggestions, err := aiClient.SuggestResourceLimits(ctx, collectPodResourceInfoForNamespace(data.Pods, data.PodMetrics, ns), ns)
 			if err != nil {
 				log.Printf("Warning: AI resource suggestion failed for namespace %s: %v", ns, err)
@@ -112,17 +149,29 @@ func main() {
 		}
 	}
 
+	// Generate output filename based on cluster name and timestamp
+	timestamp := time.Now().Format("20060102")
+	sanitizedClusterName := strings.ReplaceAll(data.ClusterName, "/", "-")
+	sanitizedClusterName = strings.ReplaceAll(sanitizedClusterName, ":", "-")
+	autoOutputFile := fmt.Sprintf("%s-%s.md", sanitizedClusterName, timestamp)
+
+	// Use auto-generated filename unless user specified a custom one
+	finalOutputFile := *outputFile
+	if *outputFile == "cluster-analysis-report.md" {
+		finalOutputFile = autoOutputFile
+	}
+
 	// Generate report
 	fmt.Println("📝 Generating report...")
 	report := GenerateReport(data, analysis)
 
 	// Write report to file
-	err = os.WriteFile(*outputFile, []byte(report), 0644)
+	err = os.WriteFile(finalOutputFile, []byte(report), 0644)
 	if err != nil {
 		log.Fatalf("Error writing report: %v", err)
 	}
 
-	fmt.Printf("✨ Analysis complete! Report saved to: %s\n", *outputFile)
+	fmt.Printf("✨ Analysis complete! Report saved to: %s\n", finalOutputFile)
 }
 
 func collectPodResourceInfoForNamespace(pods []corev1.Pod, podMetrics map[string]PodMetrics, namespace string) []PodResourceInfo {
