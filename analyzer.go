@@ -9,18 +9,35 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
 
 type Analyzer struct {
-	clientset *kubernetes.Clientset
+	clientset     *kubernetes.Clientset
+	dynamicClient dynamic.Interface
+}
+
+type PodMetrics struct {
+	Containers map[string]ContainerMetrics // containerName -> metrics
+}
+
+type ContainerMetrics struct {
+	CPUUsage    string
+	MemoryUsage string
 }
 
 type ClusterData struct {
-	Pods       []corev1.Pod
-	Nodes      []corev1.Node
-	Events     []corev1.Event
-	Namespaces []corev1.Namespace
+	ClusterName   string
+	Pods          []corev1.Pod
+	Nodes         []corev1.Node
+	Events        []corev1.Event
+	Namespaces    []corev1.Namespace
+	VeleroBackups []unstructured.Unstructured
+	PodMetrics    map[string]PodMetrics                    // namespace/podname -> metrics
+	AISuggestions map[string]map[string]ResourceSuggestion // namespace -> pod/container -> suggestion
 }
 
 type ResourceGap struct {
@@ -60,6 +77,9 @@ type Analysis struct {
 	RabbitMQFindings  RabbitMQAnalysis
 	ShortLivedJobs    JobAnalysis
 	PodRestarts       PodRestartAnalysis
+	FluxEvents        FluxEventAnalysis
+	NonFluxEvents     NonFluxEventAnalysis
+	VeleroBackups     VeleroBackupAnalysis
 	AIInsights        *AIInsights
 }
 
@@ -111,12 +131,80 @@ type PodRestartAnalysis struct {
 	TotalPods7d  int
 }
 
-func NewAnalyzer(clientset *kubernetes.Clientset) *Analyzer {
-	return &Analyzer{clientset: clientset}
+type PodResourceInfo struct {
+	Namespace     string
+	PodName       string
+	ContainerName string
+	Status        string
+	CPURequest    string
+	CPULimit      string
+	MemoryRequest string
+	MemoryLimit   string
+	CurrentCPU    string
+	CurrentMemory string
+}
+
+type EventInfo struct {
+	Type           string
+	Reason         string
+	Message        string
+	Namespace      string
+	InvolvedObject string
+	Count          int32
+	FirstTime      time.Time
+	LastTime       time.Time
+}
+
+type FluxEventAnalysis struct {
+	Last24Hours []EventInfo
+	Last48Hours []EventInfo
+	Warnings24h int
+	Warnings48h int
+	Errors24h   int
+	Errors48h   int
+}
+
+type NonFluxEventAnalysis struct {
+	Last24Hours []EventInfo
+	Last48Hours []EventInfo
+	Warnings24h int
+	Warnings48h int
+}
+
+type VeleroBackup struct {
+	Name           string
+	Namespace      string
+	Status         string
+	StartTime      time.Time
+	CompletionTime time.Time
+	Duration       time.Duration
+	Errors         int
+	Warnings       int
+}
+
+type VeleroBackupAnalysis struct {
+	Last24Hours      []VeleroBackup
+	Last48Hours      []VeleroBackup
+	TotalBackups24h  int
+	TotalBackups48h  int
+	FailedBackups24h int
+	FailedBackups48h int
+}
+
+func NewAnalyzer(clientset *kubernetes.Clientset, dynamicClient dynamic.Interface) *Analyzer {
+	return &Analyzer{
+		clientset:     clientset,
+		dynamicClient: dynamicClient,
+	}
 }
 
 func (a *Analyzer) CollectClusterData(ctx context.Context) (*ClusterData, error) {
-	data := &ClusterData{}
+	data := &ClusterData{
+		PodMetrics: make(map[string]PodMetrics),
+	}
+
+	// Get cluster name from kubeconfig context or server
+	data.ClusterName = a.getClusterName(ctx)
 
 	// Get all pods
 	pods, err := a.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
@@ -124,6 +212,9 @@ func (a *Analyzer) CollectClusterData(ctx context.Context) (*ClusterData, error)
 		return nil, fmt.Errorf("error listing pods: %w", err)
 	}
 	data.Pods = pods.Items
+
+	// Try to get pod metrics (best effort - metrics-server might not be available)
+	a.collectPodMetrics(ctx, data)
 
 	// Get all nodes
 	nodes, err := a.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
@@ -145,6 +236,21 @@ func (a *Analyzer) CollectClusterData(ctx context.Context) (*ClusterData, error)
 		return nil, fmt.Errorf("error listing namespaces: %w", err)
 	}
 	data.Namespaces = namespaces.Items
+
+	// Get Velero backups if available
+	if a.dynamicClient != nil {
+		veleroGVR := schema.GroupVersionResource{
+			Group:    "velero.io",
+			Version:  "v1",
+			Resource: "backups",
+		}
+
+		backups, err := a.dynamicClient.Resource(veleroGVR).Namespace("").List(ctx, metav1.ListOptions{})
+		if err == nil && backups != nil {
+			data.VeleroBackups = backups.Items
+		}
+		// Ignore errors - Velero might not be installed
+	}
 
 	return data, nil
 }
@@ -172,6 +278,15 @@ func (a *Analyzer) AnalyzeCluster(data *ClusterData) *Analysis {
 
 	// Analyze pod restarts
 	analysis.PodRestarts = a.analyzePodRestarts(data.Pods)
+
+	// Analyze Flux events
+	analysis.FluxEvents = a.analyzeFluxEvents(data.Events)
+
+	// Analyze non-Flux events
+	analysis.NonFluxEvents = a.analyzeNonFluxEvents(data.Events)
+
+	// Analyze Velero backups
+	analysis.VeleroBackups = a.analyzeVeleroBackups(data.VeleroBackups)
 
 	// Generate cluster health summary
 	analysis.ClusterHealth = a.generateHealthSummary(analysis)
@@ -262,6 +377,218 @@ func (a *Analyzer) analyzePodRestarts(pods []corev1.Pod) PodRestartAnalysis {
 		uniquePods7d[r.Namespace+"/"+r.PodName] = true
 	}
 	analysis.TotalPods7d = len(uniquePods7d)
+
+	return analysis
+}
+
+func (a *Analyzer) analyzeFluxEvents(events []corev1.Event) FluxEventAnalysis {
+	analysis := FluxEventAnalysis{
+		Last24Hours: []EventInfo{},
+		Last48Hours: []EventInfo{},
+	}
+
+	now := time.Now()
+	threshold24h := now.Add(-24 * time.Hour)
+	threshold48h := now.Add(-48 * time.Hour)
+
+	for _, event := range events {
+		// Check if this is a Flux-related event
+		isFlux := strings.Contains(strings.ToLower(event.Source.Component), "flux") ||
+			strings.Contains(strings.ToLower(event.InvolvedObject.Kind), "kustomization") ||
+			strings.Contains(strings.ToLower(event.InvolvedObject.Kind), "helmrelease") ||
+			strings.Contains(strings.ToLower(event.InvolvedObject.APIVersion), "fluxcd") ||
+			strings.Contains(strings.ToLower(event.InvolvedObject.APIVersion), "toolkit.fluxcd")
+
+		if !isFlux {
+			continue
+		}
+
+		eventInfo := EventInfo{
+			Type:           event.Type,
+			Reason:         event.Reason,
+			Message:        event.Message,
+			Namespace:      event.Namespace,
+			InvolvedObject: fmt.Sprintf("%s/%s", event.InvolvedObject.Kind, event.InvolvedObject.Name),
+			Count:          event.Count,
+			FirstTime:      event.FirstTimestamp.Time,
+			LastTime:       event.LastTimestamp.Time,
+		}
+
+		// Count warnings and errors
+		if event.LastTimestamp.Time.After(threshold24h) {
+			analysis.Last24Hours = append(analysis.Last24Hours, eventInfo)
+			if event.Type == "Warning" {
+				analysis.Warnings24h++
+			} else if event.Type == "Error" {
+				analysis.Errors24h++
+			}
+		}
+
+		if event.LastTimestamp.Time.After(threshold48h) {
+			analysis.Last48Hours = append(analysis.Last48Hours, eventInfo)
+			if event.Type == "Warning" {
+				analysis.Warnings48h++
+			} else if event.Type == "Error" {
+				analysis.Errors48h++
+			}
+		}
+	}
+
+	// Sort by last time (most recent first)
+	sort.Slice(analysis.Last24Hours, func(i, j int) bool {
+		return analysis.Last24Hours[i].LastTime.After(analysis.Last24Hours[j].LastTime)
+	})
+
+	sort.Slice(analysis.Last48Hours, func(i, j int) bool {
+		return analysis.Last48Hours[i].LastTime.After(analysis.Last48Hours[j].LastTime)
+	})
+
+	return analysis
+}
+
+func (a *Analyzer) analyzeNonFluxEvents(events []corev1.Event) NonFluxEventAnalysis {
+	analysis := NonFluxEventAnalysis{
+		Last24Hours: []EventInfo{},
+		Last48Hours: []EventInfo{},
+	}
+
+	now := time.Now()
+	threshold24h := now.Add(-24 * time.Hour)
+	threshold48h := now.Add(-48 * time.Hour)
+
+	for _, event := range events {
+		// Skip Flux events
+		isFlux := strings.Contains(strings.ToLower(event.Source.Component), "flux") ||
+			strings.Contains(strings.ToLower(event.InvolvedObject.Kind), "kustomization") ||
+			strings.Contains(strings.ToLower(event.InvolvedObject.Kind), "helmrelease") ||
+			strings.Contains(strings.ToLower(event.InvolvedObject.APIVersion), "fluxcd") ||
+			strings.Contains(strings.ToLower(event.InvolvedObject.APIVersion), "toolkit.fluxcd")
+
+		if isFlux {
+			continue
+		}
+
+		// Only include warnings
+		if event.Type != "Warning" {
+			continue
+		}
+
+		eventInfo := EventInfo{
+			Type:           event.Type,
+			Reason:         event.Reason,
+			Message:        event.Message,
+			Namespace:      event.Namespace,
+			InvolvedObject: fmt.Sprintf("%s/%s", event.InvolvedObject.Kind, event.InvolvedObject.Name),
+			Count:          event.Count,
+			FirstTime:      event.FirstTimestamp.Time,
+			LastTime:       event.LastTimestamp.Time,
+		}
+
+		if event.LastTimestamp.Time.After(threshold24h) {
+			analysis.Last24Hours = append(analysis.Last24Hours, eventInfo)
+			analysis.Warnings24h++
+		}
+
+		if event.LastTimestamp.Time.After(threshold48h) {
+			analysis.Last48Hours = append(analysis.Last48Hours, eventInfo)
+			analysis.Warnings48h++
+		}
+	}
+
+	// Sort by last time (most recent first)
+	sort.Slice(analysis.Last24Hours, func(i, j int) bool {
+		return analysis.Last24Hours[i].LastTime.After(analysis.Last24Hours[j].LastTime)
+	})
+
+	sort.Slice(analysis.Last48Hours, func(i, j int) bool {
+		return analysis.Last48Hours[i].LastTime.After(analysis.Last48Hours[j].LastTime)
+	})
+
+	return analysis
+}
+
+func (a *Analyzer) analyzeVeleroBackups(backups []unstructured.Unstructured) VeleroBackupAnalysis {
+	analysis := VeleroBackupAnalysis{
+		Last24Hours: []VeleroBackup{},
+		Last48Hours: []VeleroBackup{},
+	}
+
+	now := time.Now()
+	threshold24h := now.Add(-24 * time.Hour)
+	threshold48h := now.Add(-48 * time.Hour)
+
+	for _, backup := range backups {
+		// Extract backup status
+		status, found, err := unstructured.NestedMap(backup.Object, "status")
+		if !found || err != nil {
+			continue
+		}
+
+		// Get start time
+		startTimeStr, _, _ := unstructured.NestedString(status, "startTimestamp")
+		startTime, err := time.Parse(time.RFC3339, startTimeStr)
+		if err != nil {
+			continue
+		}
+
+		// Only include backups from last 48 hours
+		if !startTime.After(threshold48h) {
+			continue
+		}
+
+		// Get completion time
+		completionTimeStr, _, _ := unstructured.NestedString(status, "completionTimestamp")
+		completionTime, _ := time.Parse(time.RFC3339, completionTimeStr)
+
+		// Calculate duration
+		var duration time.Duration
+		if !completionTime.IsZero() {
+			duration = completionTime.Sub(startTime)
+		}
+
+		// Get status phase
+		phase, _, _ := unstructured.NestedString(status, "phase")
+
+		// Get errors and warnings
+		errors, _, _ := unstructured.NestedInt64(status, "errors")
+		warnings, _, _ := unstructured.NestedInt64(status, "warnings")
+
+		veleroBackup := VeleroBackup{
+			Name:           backup.GetName(),
+			Namespace:      backup.GetNamespace(),
+			Status:         phase,
+			StartTime:      startTime,
+			CompletionTime: completionTime,
+			Duration:       duration,
+			Errors:         int(errors),
+			Warnings:       int(warnings),
+		}
+
+		if startTime.After(threshold24h) {
+			analysis.Last24Hours = append(analysis.Last24Hours, veleroBackup)
+			analysis.TotalBackups24h++
+			if phase == "Failed" || phase == "PartiallyFailed" {
+				analysis.FailedBackups24h++
+			}
+		}
+
+		if startTime.After(threshold48h) {
+			analysis.Last48Hours = append(analysis.Last48Hours, veleroBackup)
+			analysis.TotalBackups48h++
+			if phase == "Failed" || phase == "PartiallyFailed" {
+				analysis.FailedBackups48h++
+			}
+		}
+	}
+
+	// Sort by start time (most recent first)
+	sort.Slice(analysis.Last24Hours, func(i, j int) bool {
+		return analysis.Last24Hours[i].StartTime.After(analysis.Last24Hours[j].StartTime)
+	})
+
+	sort.Slice(analysis.Last48Hours, func(i, j int) bool {
+		return analysis.Last48Hours[i].StartTime.After(analysis.Last48Hours[j].StartTime)
+	})
 
 	return analysis
 }
@@ -597,4 +924,198 @@ func (a *Analyzer) generateCriticalIssues(analysis *Analysis) []CriticalIssue {
 	}
 
 	return issues
+}
+
+func (a *Analyzer) collectPodResourceInfo(ctx context.Context, pods []corev1.Pod) []PodResourceInfo {
+	var podInfos []PodResourceInfo
+
+	// Get pod metrics if available (best effort)
+	metricsAvailable := false
+	podMetrics := make(map[string]map[string]corev1.ResourceList) // namespace/pod -> container -> metrics
+
+	// Try to get metrics from metrics-server
+	// This is a best-effort attempt - if metrics-server is not available, we'll just show configured values
+	if a.clientset != nil {
+		// Note: This would require importing metrics client, for now we'll just show configured values
+		// In production, you'd use: metricsv1beta1 "k8s.io/metrics/pkg/client/clientset/versioned"
+		metricsAvailable = false
+	}
+
+	for _, pod := range pods {
+		// Only include running pods
+		if pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+
+		for _, container := range pod.Spec.Containers {
+			podInfo := PodResourceInfo{
+				Namespace:     pod.Namespace,
+				PodName:       pod.Name,
+				ContainerName: container.Name,
+				Status:        string(pod.Status.Phase),
+			}
+
+			// Get configured requests and limits
+			if container.Resources.Requests != nil {
+				if cpu, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
+					podInfo.CPURequest = cpu.String()
+				} else {
+					podInfo.CPURequest = "Not Set"
+				}
+				if mem, ok := container.Resources.Requests[corev1.ResourceMemory]; ok {
+					podInfo.MemoryRequest = mem.String()
+				} else {
+					podInfo.MemoryRequest = "Not Set"
+				}
+			} else {
+				podInfo.CPURequest = "Not Set"
+				podInfo.MemoryRequest = "Not Set"
+			}
+
+			if container.Resources.Limits != nil {
+				if cpu, ok := container.Resources.Limits[corev1.ResourceCPU]; ok {
+					podInfo.CPULimit = cpu.String()
+				} else {
+					podInfo.CPULimit = "Not Set"
+				}
+				if mem, ok := container.Resources.Limits[corev1.ResourceMemory]; ok {
+					podInfo.MemoryLimit = mem.String()
+				} else {
+					podInfo.MemoryLimit = "Not Set"
+				}
+			} else {
+				podInfo.CPULimit = "Not Set"
+				podInfo.MemoryLimit = "Not Set"
+			}
+
+			// Get current usage if metrics are available
+			if metricsAvailable {
+				if podMetric, ok := podMetrics[pod.Namespace+"/"+pod.Name]; ok {
+					if containerMetric, ok := podMetric[container.Name]; ok {
+						if cpu, ok := containerMetric[corev1.ResourceCPU]; ok {
+							podInfo.CurrentCPU = cpu.String()
+						}
+						if mem, ok := containerMetric[corev1.ResourceMemory]; ok {
+							podInfo.CurrentMemory = mem.String()
+						}
+					}
+				}
+			} else {
+				podInfo.CurrentCPU = "N/A"
+				podInfo.CurrentMemory = "N/A"
+			}
+
+			podInfos = append(podInfos, podInfo)
+		}
+	}
+
+	// Sort by namespace, then pod name, then container name
+	sort.Slice(podInfos, func(i, j int) bool {
+		if podInfos[i].Namespace != podInfos[j].Namespace {
+			return podInfos[i].Namespace < podInfos[j].Namespace
+		}
+		if podInfos[i].PodName != podInfos[j].PodName {
+			return podInfos[i].PodName < podInfos[j].PodName
+		}
+		return podInfos[i].ContainerName < podInfos[j].ContainerName
+	})
+
+	return podInfos
+}
+
+func (a *Analyzer) getClusterName(ctx context.Context) string {
+	// Try to get cluster name from kube-system namespace configmap
+	cm, err := a.clientset.CoreV1().ConfigMaps("kube-system").Get(ctx, "cluster-info", metav1.GetOptions{})
+	if err == nil && cm.Data != nil {
+		if clusterName, ok := cm.Data["cluster-name"]; ok {
+			return clusterName
+		}
+	}
+
+	// Try to get from kube-public namespace
+	cm, err = a.clientset.CoreV1().ConfigMaps("kube-public").Get(ctx, "cluster-info", metav1.GetOptions{})
+	if err == nil && cm.Data != nil {
+		if clusterName, ok := cm.Data["cluster-name"]; ok {
+			return clusterName
+		}
+	}
+
+	// Fallback: try to extract from server URL or use "Unknown"
+	// Get the first node and check for labels
+	nodes, err := a.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{Limit: 1})
+	if err == nil && len(nodes.Items) > 0 {
+		node := nodes.Items[0]
+		// Check common labels for cluster name
+		if name, ok := node.Labels["cluster-name"]; ok {
+			return name
+		}
+		if name, ok := node.Labels["alpha.eksctl.io/cluster-name"]; ok {
+			return name
+		}
+		if name, ok := node.Labels["kubernetes.azure.com/cluster"]; ok {
+			return name
+		}
+		// AKS cluster name from node resource group
+		if rg, ok := node.Labels["kubernetes.azure.com/node-pool-name"]; ok {
+			return "AKS-" + rg
+		}
+	}
+
+	return "Unknown Cluster"
+}
+
+func (a *Analyzer) collectPodMetrics(ctx context.Context, data *ClusterData) {
+	// Try to get metrics from metrics-server using dynamic client
+	metricsGVR := schema.GroupVersionResource{
+		Group:    "metrics.k8s.io",
+		Version:  "v1beta1",
+		Resource: "pods",
+	}
+
+	metricsList, err := a.dynamicClient.Resource(metricsGVR).Namespace("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		// Metrics-server not available or error fetching metrics
+		return
+	}
+
+	// Parse metrics
+	for _, item := range metricsList.Items {
+		namespace, _, _ := unstructured.NestedString(item.Object, "metadata", "namespace")
+		name, _, _ := unstructured.NestedString(item.Object, "metadata", "name")
+
+		containers, found, _ := unstructured.NestedSlice(item.Object, "containers")
+		if !found {
+			continue
+		}
+
+		podMetrics := PodMetrics{
+			Containers: make(map[string]ContainerMetrics),
+		}
+
+		for _, c := range containers {
+			container, ok := c.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			containerName, _, _ := unstructured.NestedString(container, "name")
+			usage, found, _ := unstructured.NestedMap(container, "usage")
+			if !found {
+				continue
+			}
+
+			metrics := ContainerMetrics{}
+			if cpu, ok := usage["cpu"].(string); ok {
+				metrics.CPUUsage = cpu
+			}
+			if mem, ok := usage["memory"].(string); ok {
+				metrics.MemoryUsage = mem
+			}
+
+			podMetrics.Containers[containerName] = metrics
+		}
+
+		key := namespace + "/" + name
+		data.PodMetrics[key] = podMetrics
+	}
 }

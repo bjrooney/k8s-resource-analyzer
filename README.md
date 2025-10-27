@@ -133,15 +133,24 @@ The generated report includes:
 3. **Resource Management**: Analysis of missing requests/limits and their impact
 4. **Node Analysis**: Node utilization, OOM events, and autoscaling recommendations
 5. **Pod Restart Analysis**: Pods with restarts in last 24 hours and 7 days
-6. **RabbitMQ Stability**: Specific recommendations for RabbitMQ workload protection
-7. **Namespace Analysis**: Detailed per-namespace breakdown with risk levels
-8. **AI Insights** (if enabled): AI-generated recommendations and strategic insights
+6. **Flux Events Analysis**: Flux reconciliation events and warnings (24h/48h)
+7. **Non-Flux Warning Events**: General cluster warning events (24h/48h)
+8. **Velero Backup Analysis**: Backup status, duration, and health (24h/48h)
+9. **RabbitMQ Stability**: Specific recommendations for RabbitMQ workload protection
+10. **Namespace Analysis**: Detailed per-namespace breakdown with risk levels
+11. **AI Insights** (if enabled): AI-generated recommendations and strategic insights
+12. **Appendix**: 
+    - Complete inventory of all running pods with resource configurations
+    - **Actual CPU/Memory usage** (when metrics-server is available)
+    - Summary statistics on resource configuration coverage
+    - Useful commands and resources
 
 ## What the Tool Analyzes
 
 ### Resource Management
 - Pods missing CPU/memory requests
 - Pods missing CPU/memory limits
+- **Actual resource usage vs configured limits** (requires metrics-server)
 - Impact on Velero backups
 - Impact on system pod stability
 - Short-lived job patterns
@@ -172,12 +181,61 @@ When AI integration is enabled, the tool provides:
 - **Automation Suggestions**: Recommendations for policies, quotas, and preventive measures
 - **Strategic Insights**: Long-term optimization strategies
 
+## Appendix Features
+
+The report includes a comprehensive appendix with:
+
+### Section B: All Active Pods - Resource Configuration
+
+A complete inventory table showing every running container in your cluster with:
+- **Namespace** and **Pod Name**
+- **Container Name**
+- **CPU Request** and **CPU Limit**
+- **Memory Request** and **Memory Limit**
+- **Current CPU Usage** and **Current Memory Usage** (when metrics-server available)
+- **Status** (Running, Pending, etc.)
+
+Pods are organized by namespace with summary statistics showing:
+- Total running containers
+- Percentage with full resource configuration
+- Percentage missing requests or limits
+
+This detailed inventory helps you:
+- Quickly identify pods without resource settings
+- Audit resource configurations across all namespaces
+- Export data for capacity planning
+- Track resource allocation compliance
+
+### Section D: Useful Commands
+
+Ready-to-use `kubectl` commands for:
+- Finding pods without resource requests
+- Checking resource usage by namespace
+- Viewing individual pod configurations
+
 ## Example Output
 
 ```markdown
 # Kubernetes Cluster Analysis Report
 
+**Cluster:** production-aks-cluster  
 **Generated:** 2025-10-27T10:30:00Z
+
+---
+
+## 1. Cluster Health Summary
+
+````
+
+## Example Output (Appendix B)
+
+```markdown
+#### Namespace: `production` (42 containers)
+
+| Pod | Container | CPU Req | CPU Limit | Mem Req | Mem Limit | Current CPU | Current Mem | Status |
+|-----|-----------|---------|-----------|---------|-----------|-------------|-------------|--------|
+| `api-7d5f8c-abc` | `api` | 500m | 1000m | 512Mi | 1Gi | 234m | 456Mi | Running |
+| `cache-redis-0` | `redis` | Not Set | Not Set | Not Set | Not Set | 45m | 89Mi | Running |
 
 ---
 

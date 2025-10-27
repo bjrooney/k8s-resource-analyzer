@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -39,12 +41,17 @@ func main() {
 		log.Fatalf("Error creating kubernetes client: %v", err)
 	}
 
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Error creating dynamic client: %v", err)
+	}
+
 	ctx := context.Background()
 
 	fmt.Println("🔍 Analyzing Kubernetes cluster...")
 
 	// Initialize analyzer
-	analyzer := NewAnalyzer(clientset)
+	analyzer := NewAnalyzer(clientset, dynamicClient)
 
 	// Collect cluster data
 	fmt.Println("📊 Collecting cluster data...")
@@ -88,6 +95,21 @@ func main() {
 		} else {
 			analysis.AIInsights = aiInsights
 		}
+
+		// Generate AI resource suggestions for specific namespaces
+		fmt.Println("🎯 Generating AI resource suggestions for key namespaces (cgh, velero)...")
+		data.AISuggestions = make(map[string]map[string]ResourceSuggestion)
+
+		targetNamespaces := []string{"cgh", "velero"}
+		for _, ns := range targetNamespaces {
+			suggestions, err := aiClient.SuggestResourceLimits(ctx, collectPodResourceInfoForNamespace(data.Pods, data.PodMetrics, ns), ns)
+			if err != nil {
+				log.Printf("Warning: AI resource suggestion failed for namespace %s: %v", ns, err)
+			} else if len(suggestions) > 0 {
+				data.AISuggestions[ns] = suggestions
+				fmt.Printf("   ✅ Generated suggestions for %d pods in namespace '%s'\n", len(suggestions), ns)
+			}
+		}
 	}
 
 	// Generate report
@@ -101,6 +123,78 @@ func main() {
 	}
 
 	fmt.Printf("✨ Analysis complete! Report saved to: %s\n", *outputFile)
+}
+
+func collectPodResourceInfoForNamespace(pods []corev1.Pod, podMetrics map[string]PodMetrics, namespace string) []PodResourceInfo {
+	var podInfos []PodResourceInfo
+
+	for _, pod := range pods {
+		if pod.Namespace != namespace || pod.Status.Phase != corev1.PodRunning {
+			continue
+		}
+
+		for _, container := range pod.Spec.Containers {
+			podInfo := PodResourceInfo{
+				Namespace:     pod.Namespace,
+				PodName:       pod.Name,
+				ContainerName: container.Name,
+				Status:        string(pod.Status.Phase),
+			}
+
+			// Get configured requests and limits
+			if container.Resources.Requests != nil {
+				if cpu, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
+					podInfo.CPURequest = cpu.String()
+				} else {
+					podInfo.CPURequest = "Not Set"
+				}
+				if mem, ok := container.Resources.Requests[corev1.ResourceMemory]; ok {
+					podInfo.MemoryRequest = mem.String()
+				} else {
+					podInfo.MemoryRequest = "Not Set"
+				}
+			} else {
+				podInfo.CPURequest = "Not Set"
+				podInfo.MemoryRequest = "Not Set"
+			}
+
+			if container.Resources.Limits != nil {
+				if cpu, ok := container.Resources.Limits[corev1.ResourceCPU]; ok {
+					podInfo.CPULimit = cpu.String()
+				} else {
+					podInfo.CPULimit = "Not Set"
+				}
+				if mem, ok := container.Resources.Limits[corev1.ResourceMemory]; ok {
+					podInfo.MemoryLimit = mem.String()
+				} else {
+					podInfo.MemoryLimit = "Not Set"
+				}
+			} else {
+				podInfo.CPULimit = "Not Set"
+				podInfo.MemoryLimit = "Not Set"
+			}
+
+			// Get actual usage from metrics if available
+			podKey := pod.Namespace + "/" + pod.Name
+			if podMetric, ok := podMetrics[podKey]; ok {
+				if containerMetric, ok := podMetric.Containers[container.Name]; ok {
+					podInfo.CurrentCPU = containerMetric.CPUUsage
+					podInfo.CurrentMemory = containerMetric.MemoryUsage
+				}
+			}
+
+			if podInfo.CurrentCPU == "" {
+				podInfo.CurrentCPU = "N/A"
+			}
+			if podInfo.CurrentMemory == "" {
+				podInfo.CurrentMemory = "N/A"
+			}
+
+			podInfos = append(podInfos, podInfo)
+		}
+	}
+
+	return podInfos
 }
 
 func buildConfig(kubeconfig string) (*rest.Config, error) {

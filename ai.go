@@ -173,3 +173,114 @@ func getSystemPrompt() string {
 
 Format your response in clear, well-structured Markdown with sections and code examples where appropriate.`
 }
+
+func (ai *AIClient) SuggestResourceLimits(ctx context.Context, pods []PodResourceInfo, namespace string) (map[string]ResourceSuggestion, error) {
+	// Filter pods for the specific namespace that are missing resources
+	var missingResourcePods []PodResourceInfo
+	for _, pod := range pods {
+		if pod.Namespace != namespace {
+			continue
+		}
+		if pod.CPURequest == "Not Set" || pod.CPULimit == "Not Set" ||
+			pod.MemoryRequest == "Not Set" || pod.MemoryLimit == "Not Set" {
+			missingResourcePods = append(missingResourcePods, pod)
+		}
+	}
+
+	if len(missingResourcePods) == 0 {
+		return nil, nil
+	}
+
+	// Build prompt
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Analyze the following pods in namespace '%s' and suggest appropriate CPU and Memory requests/limits.\n\n", namespace))
+	sb.WriteString("Pods with missing resource configurations:\n\n")
+
+	for _, pod := range missingResourcePods {
+		sb.WriteString(fmt.Sprintf("**Pod: %s, Container: %s**\n", pod.PodName, pod.ContainerName))
+		sb.WriteString(fmt.Sprintf("- CPU Request: %s\n", pod.CPURequest))
+		sb.WriteString(fmt.Sprintf("- CPU Limit: %s\n", pod.CPULimit))
+		sb.WriteString(fmt.Sprintf("- Memory Request: %s\n", pod.MemoryRequest))
+		sb.WriteString(fmt.Sprintf("- Memory Limit: %s\n", pod.MemoryLimit))
+		if pod.CurrentCPU != "N/A" {
+			sb.WriteString(fmt.Sprintf("- Current CPU Usage: %s\n", pod.CurrentCPU))
+		}
+		if pod.CurrentMemory != "N/A" {
+			sb.WriteString(fmt.Sprintf("- Current Memory Usage: %s\n", pod.CurrentMemory))
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("\nProvide suggested values for ONLY the missing fields. Format your response as:\n")
+	sb.WriteString("POD_NAME|CONTAINER_NAME|CPU_REQUEST|CPU_LIMIT|MEMORY_REQUEST|MEMORY_LIMIT\n")
+	sb.WriteString("\nUse 'KEEP' for values that are already set. Base suggestions on current usage if available, or provide reasonable defaults for the workload type.\n")
+	sb.WriteString("For example: my-pod|app|100m|200m|256Mi|512Mi\n")
+
+	// Call AI
+	resp, err := ai.client.CreateChatCompletion(
+		ctx,
+		openai.ChatCompletionRequest{
+			Model: ai.model,
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleSystem,
+					Content: "You are a Kubernetes resource optimization expert. Provide conservative but appropriate resource limits based on current usage patterns and workload types.",
+				},
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: sb.String(),
+				},
+			},
+			Temperature: 0.3,
+			MaxTokens:   1500,
+		},
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("OpenAI API error: %w", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		return nil, fmt.Errorf("no response from OpenAI")
+	}
+
+	// Parse response
+	suggestions := parseResourceSuggestions(resp.Choices[0].Message.Content)
+	return suggestions, nil
+}
+
+type ResourceSuggestion struct {
+	PodName       string
+	ContainerName string
+	CPURequest    string
+	CPULimit      string
+	MemoryRequest string
+	MemoryLimit   string
+}
+
+func parseResourceSuggestions(response string) map[string]ResourceSuggestion {
+	suggestions := make(map[string]ResourceSuggestion)
+	lines := strings.Split(response, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.Contains(line, "|CONTAINER_NAME|") {
+			continue
+		}
+
+		parts := strings.Split(line, "|")
+		if len(parts) >= 6 {
+			key := parts[0] + "/" + parts[1]
+			suggestions[key] = ResourceSuggestion{
+				PodName:       strings.TrimSpace(parts[0]),
+				ContainerName: strings.TrimSpace(parts[1]),
+				CPURequest:    strings.TrimSpace(parts[2]),
+				CPULimit:      strings.TrimSpace(parts[3]),
+				MemoryRequest: strings.TrimSpace(parts[4]),
+				MemoryLimit:   strings.TrimSpace(parts[5]),
+			}
+		}
+	}
+
+	return suggestions
+}
