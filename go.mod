@@ -3,7 +3,7 @@ module github.com/sita/k8s-resource-analyzer
 go 1.24.0
 
 require (
-	github.com/sashabaranov/go-openai v1.35.6
+	github.com/sashabaranov/go-openai v1.41.2
 	k8s.io/api v0.34.1
 	k8s.io/apimachinery v0.34.1
 	k8s.io/client-go v0.34.1
