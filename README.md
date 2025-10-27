@@ -76,7 +76,8 @@ This will:
 1. Connect to your Kubernetes cluster
 2. Collect pod, node, and event data
 3. Perform comprehensive analysis
-4. Generate a report: `cluster-analysis-report.md`
+4. **Auto-generate filename**: `<cluster-name>-YYYYMMDD.md` (e.g., `production-aks-eastus-20251027.md`)
+5. **AI suggestions for all namespaces** with missing resources (if AI enabled)
 
 ### Advanced Options
 
@@ -90,7 +91,7 @@ This will:
 #### Command-Line Flags
 
 - `-kubeconfig`: Path to kubeconfig file (default: `~/.kube/config`)
-- `-output`: Output file path (default: `cluster-analysis-report.md`)
+- `-output`: Output file path (default: auto-generated as `<cluster-name>-YYYYMMDD.md`)
 - `-ai-provider`: AI provider to use: `openai` or `azure` (default: `openai`)
 - `-ai-endpoint`: Azure OpenAI endpoint URL (required if using Azure)
 - `-ai-model`: AI model to use (default: `gpt-4o`)
