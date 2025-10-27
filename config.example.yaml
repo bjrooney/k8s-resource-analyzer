@@ -1,0 +1,93 @@
+# Example configuration file for k8s-resource-analyzer
+# Copy this to config.yaml and customize as needed
+
+# Kubernetes configuration
+kubernetes:
+  # Path to kubeconfig file (optional, defaults to ~/.kube/config)
+  kubeconfig: ""
+  
+  # Context to use (optional, defaults to current context)
+  context: ""
+
+# Output configuration
+output:
+  # Path for the generated report
+  file: "cluster-analysis-report.md"
+  
+  # Output format (currently only markdown supported)
+  format: "markdown"
+
+# AI configuration
+ai:
+  # Provider: "openai" or "azure"
+  provider: "openai"
+  
+  # API endpoint (required for Azure OpenAI)
+  endpoint: ""
+  
+  # Model to use (default: gpt-4)
+  model: "gpt-4"
+  
+  # Temperature (0.0-1.0, higher = more creative)
+  temperature: 0.7
+  
+  # Max tokens for AI response
+  max_tokens: 2000
+
+# Analysis thresholds
+thresholds:
+  # Node resource utilization threshold (percentage)
+  node_cpu_threshold: 80
+  node_memory_threshold: 80
+  
+  # Namespace risk level thresholds (percentage of pods without resources)
+  critical_risk: 75
+  high_risk: 50
+  medium_risk: 25
+  
+  # Short-lived job duration (minutes)
+  short_job_duration: 2
+  
+  # Priority class value for critical workloads
+  critical_priority: 1000000
+
+# Filtering options
+filters:
+  # Namespaces to include (empty = all)
+  include_namespaces: []
+  
+  # Namespaces to exclude
+  exclude_namespaces:
+    - kube-system
+    - kube-public
+    - kube-node-lease
+  
+  # Only analyze application namespaces (3-letter codes)
+  app_namespaces_only: true
+
+# RabbitMQ specific settings
+rabbitmq:
+  # Keywords to identify RabbitMQ pods
+  keywords:
+    - rabbitmq
+    - rabbit
+  
+  # Recommended resource settings
+  recommended_resources:
+    requests:
+      memory: "2Gi"
+      cpu: "1000m"
+    limits:
+      memory: "4Gi"
+      cpu: "2000m"
+
+# Report sections to include
+report_sections:
+  cluster_health: true
+  critical_issues: true
+  resource_management: true
+  node_analysis: true
+  rabbitmq_stability: true
+  namespace_analysis: true
+  ai_insights: true
+  appendix: true
