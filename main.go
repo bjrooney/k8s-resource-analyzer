@@ -112,9 +112,10 @@ func main() {
 				hasMissingResources := false
 				if container.Resources.Requests == nil {
 					hasMissingResources = true
-				} else if container.Resources.Limits == nil {
+				}
+				if container.Resources.Limits == nil {
 					hasMissingResources = true
-				} else {
+				} else if container.Resources.Requests != nil {
 					if _, ok := container.Resources.Requests[corev1.ResourceCPU]; !ok {
 						hasMissingResources = true
 					}
