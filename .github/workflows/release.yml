@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # Windows
+          - goos: windows
+            goarch: amd64
+            artifact_name: k8s-analyzer-windows-amd64.exe
+
+          # Linux amd64
+          - goos: linux
+            goarch: amd64
+            artifact_name: k8s-analyzer-linux-amd64
+
+          # Linux arm64
+          - goos: linux
+            goarch: arm64
+            artifact_name: k8s-analyzer-linux-arm64
+
+          # Linux arm (32-bit)
+          - goos: linux
+            goarch: arm
+            artifact_name: k8s-analyzer-linux-arm
+
+          # macOS Intel (amd64)
+          - goos: darwin
+            goarch: amd64
+            artifact_name: k8s-analyzer-darwin-amd64
+
+          # macOS Apple Silicon (arm64/M1/M2/M3/M4)
+          - goos: darwin
+            goarch: arm64
+            artifact_name: k8s-analyzer-darwin-arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -ldflags="-s -w" -o ${{ matrix.artifact_name }} .
+
+      - name: Generate checksum
+        run: |
+          sha256sum ${{ matrix.artifact_name }} > \
+            ${{ matrix.artifact_name }}.sha256
+
+      - name: Upload binary to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ matrix.artifact_name }}
+            ${{ matrix.artifact_name }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
