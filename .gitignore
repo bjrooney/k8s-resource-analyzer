@@ -3,7 +3,6 @@ k8s-analyzer
 k8s-resource-analyzer
 
 # Reports
-*.md
 !README.md
 
 # IDE

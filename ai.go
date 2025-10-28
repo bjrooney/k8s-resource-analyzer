@@ -63,7 +63,7 @@ func (ai *AIClient) AnalyzeCluster(ctx context.Context, data *ClusterData, analy
 				},
 			},
 			Temperature: 0.7,
-			MaxTokens:   2000,
+			MaxCompletionTokens:   2000,
 		},
 	)
 
@@ -232,7 +232,7 @@ func (ai *AIClient) SuggestResourceLimits(ctx context.Context, pods []PodResourc
 				},
 			},
 			Temperature: 0.3,
-			MaxTokens:   1500,
+			MaxCompletionTokens:   1500,
 		},
 	)
 
