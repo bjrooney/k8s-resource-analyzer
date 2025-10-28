@@ -1,0 +1,104 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test -v ./...
+
+  build:
+    name: Build
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # Windows
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            binary_suffix: .exe
+            artifact_name: k8s-analyzer-windows-amd64.exe
+
+          # Linux amd64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            binary_suffix: ''
+            artifact_name: k8s-analyzer-linux-amd64
+
+          # Linux arm64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            binary_suffix: ''
+            artifact_name: k8s-analyzer-linux-arm64
+
+          # Linux arm (32-bit)
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm
+            binary_suffix: ''
+            artifact_name: k8s-analyzer-linux-arm
+
+          # macOS Intel (amd64)
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            binary_suffix: ''
+            artifact_name: k8s-analyzer-darwin-amd64
+
+          # macOS Apple Silicon (arm64/M1/M2/M3/M4)
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            binary_suffix: ''
+            artifact_name: k8s-analyzer-darwin-arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -o ${{ matrix.artifact_name }} .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}
+          retention-days: 7
