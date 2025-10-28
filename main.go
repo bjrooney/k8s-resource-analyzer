@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -26,7 +28,7 @@ func main() {
 		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
 	}
 
-	outputFile := flag.String("output", "cluster-analysis-report.md", "output file path for the analysis report")
+	// Note: Output is now always generated in a directory structure
 	aiProvider := flag.String("ai-provider", "openai", "AI provider (openai or azure)")
 	aiEndpoint := flag.String("ai-endpoint", "", "AI endpoint URL (for Azure OpenAI)")
 	aiModel := flag.String("ai-model", "gpt-4o", "AI model to use (gpt-4o, gpt-4o-mini, gpt-4-turbo, etc.)")
@@ -150,29 +152,260 @@ func main() {
 		}
 	}
 
-	// Generate output filename based on cluster name and timestamp
-	timestamp := time.Now().Format("20060102")
+	// Generate output directory and filename based on cluster name and timestamp
+	timestamp := time.Now().Format("20060102-150405")
 	sanitizedClusterName := strings.ReplaceAll(data.ClusterName, "/", "-")
 	sanitizedClusterName = strings.ReplaceAll(sanitizedClusterName, ":", "-")
-	autoOutputFile := fmt.Sprintf("%s-%s.md", sanitizedClusterName, timestamp)
+	baseFilename := fmt.Sprintf("%s-%s", sanitizedClusterName, timestamp)
 
-	// Use auto-generated filename unless user specified a custom one
-	finalOutputFile := *outputFile
-	if *outputFile == "cluster-analysis-report.md" {
-		finalOutputFile = autoOutputFile
+	// Create output directory
+	outputDir := baseFilename
+	err = os.MkdirAll(outputDir, 0755)
+	if err != nil {
+		log.Fatalf("Error creating output directory: %v", err)
 	}
 
 	// Generate report
 	fmt.Println("📝 Generating report...")
 	report := GenerateReport(data, analysis)
 
-	// Write report to file
-	err = os.WriteFile(finalOutputFile, []byte(report), 0644)
+	// Write Markdown file
+	mdFile := filepath.Join(outputDir, baseFilename+".md")
+	err = os.WriteFile(mdFile, []byte(report), 0644)
 	if err != nil {
-		log.Fatalf("Error writing report: %v", err)
+		log.Fatalf("Error writing markdown report: %v", err)
+	}
+	fmt.Printf("✅ Markdown report saved to: %s\n", mdFile)
+
+	// Generate HTML file
+	htmlFile := filepath.Join(outputDir, baseFilename+".html")
+	err = generateHTMLReport(report, htmlFile, baseFilename)
+	if err != nil {
+		fmt.Printf("⚠️  Warning: Could not generate HTML: %v\n", err)
+	} else {
+		fmt.Printf("✅ HTML report saved to: %s\n", htmlFile)
 	}
 
-	fmt.Printf("✨ Analysis complete! Report saved to: %s\n", finalOutputFile)
+	// Generate PDF file using pandoc if available
+	pdfFile := filepath.Join(outputDir, baseFilename+".pdf")
+	err = generatePDFReport(mdFile, pdfFile)
+	if err != nil {
+		fmt.Printf("⚠️  Warning: Could not generate PDF: %v\n", err)
+		fmt.Println("   (Install pandoc and wkhtmltopdf for PDF generation)")
+	} else {
+		fmt.Printf("✅ PDF report saved to: %s\n", pdfFile)
+	}
+
+	fmt.Printf("\n✨ Analysis complete! Reports saved to directory: %s/\n", outputDir)
+}
+
+func generateHTMLReport(markdown string, outputFile string, title string) error {
+	// Convert markdown to HTML with custom styling
+	htmlContent := fmt.Sprintf(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>%s - Kubernetes Cluster Analysis</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+        h2 { color: #34495e; border-bottom: 2px solid #95a5a6; padding-bottom: 8px; margin-top: 30px; }
+        h3 { color: #555; margin-top: 20px; }
+        pre {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+            border-left: 4px solid #3498db;
+        }
+        code {
+            background: #f8f9fa;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: "Courier New", monospace;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%%;
+            margin: 20px 0;
+            font-size: 14px;
+        }
+        th {
+            background: #3498db;
+            color: white;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+        }
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #ddd;
+        }
+        tr:hover {
+            background: #f8f9fa;
+        }
+        .emoji {
+            font-size: 1.2em;
+        }
+        ul, ol {
+            margin: 10px 0;
+            padding-left: 30px;
+        }
+        li {
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+%s
+    </div>
+</body>
+</html>`, title, convertMarkdownToHTML(markdown))
+
+	return os.WriteFile(outputFile, []byte(htmlContent), 0644)
+}
+
+func convertMarkdownToHTML(markdown string) string {
+	// Basic markdown to HTML conversion
+	html := markdown
+
+	// Convert headers
+	html = regexp.MustCompile(`(?m)^# (.+)$`).ReplaceAllString(html, "<h1>$1</h1>")
+	html = regexp.MustCompile(`(?m)^## (.+)$`).ReplaceAllString(html, "<h2>$1</h2>")
+	html = regexp.MustCompile(`(?m)^### (.+)$`).ReplaceAllString(html, "<h3>$1</h3>")
+	html = regexp.MustCompile(`(?m)^#### (.+)$`).ReplaceAllString(html, "<h4>$1</h4>")
+
+	// Convert code blocks
+	html = regexp.MustCompile("(?s)```([^`]+)```").ReplaceAllString(html, "<pre><code>$1</code></pre>")
+
+	// Convert inline code
+	html = regexp.MustCompile("`([^`]+)`").ReplaceAllString(html, "<code>$1</code>")
+
+	// Convert bold
+	html = regexp.MustCompile(`\*\*([^*]+)\*\*`).ReplaceAllString(html, "<strong>$1</strong>")
+
+	// Convert italic (be careful not to match **text**)
+	html = regexp.MustCompile(`([^*])\*([^*]+)\*([^*])`).ReplaceAllString(html, "$1<em>$2</em>$3")
+
+	// Convert unordered lists - process line by line
+	lines := strings.Split(html, "\n")
+	var processedLines []string
+	inList := false
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- ") {
+			if !inList {
+				processedLines = append(processedLines, "<ul>")
+				inList = true
+			}
+			content := strings.TrimPrefix(trimmed, "- ")
+			processedLines = append(processedLines, "<li>"+content+"</li>")
+
+			// Check if next line is not a list item
+			if i+1 >= len(lines) || !strings.HasPrefix(strings.TrimSpace(lines[i+1]), "- ") {
+				processedLines = append(processedLines, "</ul>")
+				inList = false
+			}
+		} else {
+			processedLines = append(processedLines, line)
+		}
+	}
+	html = strings.Join(processedLines, "\n")
+
+	// Convert tables (basic support)
+	lines = strings.Split(html, "\n")
+	var result strings.Builder
+	inTable := false
+
+	for i, line := range lines {
+		if strings.HasPrefix(line, "|") {
+			if !inTable {
+				result.WriteString("<table>\n")
+				inTable = true
+			}
+
+			// Check if it's a separator line
+			if strings.Contains(line, "---") {
+				continue
+			}
+
+			cells := strings.Split(strings.Trim(line, "|"), "|")
+			if i > 0 && strings.Contains(lines[i-1], "---") {
+				// Regular row
+				result.WriteString("<tr>")
+				for _, cell := range cells {
+					result.WriteString("<td>" + strings.TrimSpace(cell) + "</td>")
+				}
+				result.WriteString("</tr>\n")
+			} else if !strings.Contains(line, "---") {
+				// Header row
+				result.WriteString("<tr>")
+				for _, cell := range cells {
+					result.WriteString("<th>" + strings.TrimSpace(cell) + "</th>")
+				}
+				result.WriteString("</tr>\n")
+			}
+		} else {
+			if inTable {
+				result.WriteString("</table>\n")
+				inTable = false
+			}
+			result.WriteString(line + "\n")
+		}
+	}
+
+	if inTable {
+		result.WriteString("</table>\n")
+	}
+
+	html = result.String()
+
+	// Convert line breaks to paragraphs
+	html = regexp.MustCompile(`\n\n+`).ReplaceAllString(html, "</p><p>")
+	html = "<p>" + html + "</p>"
+
+	// Clean up empty paragraphs
+	html = regexp.MustCompile(`<p>\s*</p>`).ReplaceAllString(html, "")
+
+	return html
+}
+
+func generatePDFReport(mdFile string, pdfFile string) error {
+	// Check if pandoc is available
+	_, err := exec.LookPath("pandoc")
+	if err != nil {
+		return fmt.Errorf("pandoc not found in PATH")
+	}
+
+	// Use pandoc to convert markdown to PDF
+	cmd := exec.Command("pandoc", mdFile, "-o", pdfFile,
+		"--pdf-engine=wkhtmltopdf",
+		"--variable", "geometry:margin=1in",
+		"--variable", "fontsize=10pt")
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("pandoc conversion failed: %v\nOutput: %s", err, string(output))
+	}
+
+	return nil
 }
 
 func collectPodResourceInfoForNamespace(pods []corev1.Pod, podMetrics map[string]PodMetrics, namespace string) []PodResourceInfo {

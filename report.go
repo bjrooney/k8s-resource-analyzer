@@ -202,6 +202,126 @@ func generateResourceManagementSection(analysis *Analysis) string {
 				sb.WriteString("- Implement job cleanup policies to prevent accumulation\n\n")
 			}
 		}
+
+		// Job Execution Details by Namespace
+		if len(analysis.ShortLivedJobs.JobExecutions) > 0 {
+			sb.WriteString("### Job Execution Details (Last 24 Hours)\n\n")
+			sb.WriteString("Analysis of job pod executions per namespace showing frequency and node distribution.\n\n")
+
+			// Sort namespaces for consistent output
+			namespaces := make([]string, 0, len(analysis.ShortLivedJobs.JobExecutions))
+			for ns := range analysis.ShortLivedJobs.JobExecutions {
+				namespaces = append(namespaces, ns)
+			}
+			sort.Strings(namespaces)
+
+			for _, ns := range namespaces {
+				executions := analysis.ShortLivedJobs.JobExecutions[ns]
+				if len(executions) == 0 {
+					continue
+				}
+
+				sb.WriteString(fmt.Sprintf("#### Namespace: `%s`\n\n", ns))
+				sb.WriteString(fmt.Sprintf("**Total Job Executions**: %d in last 24 hours\n\n", len(executions)))
+
+				// Count executions per job and track nodes
+				jobCounts := make(map[string]int)
+				jobNodes := make(map[string]map[string]int) // jobName -> nodeName -> count
+				for _, exec := range executions {
+					jobCounts[exec.JobName]++
+					if jobNodes[exec.JobName] == nil {
+						jobNodes[exec.JobName] = make(map[string]int)
+					}
+					jobNodes[exec.JobName][exec.NodeName]++
+				}
+
+				// Create summary table
+				sb.WriteString("| Job Name | Executions | Nodes Used | Status Summary |\n")
+				sb.WriteString("|----------|------------|------------|----------------|\n")
+
+				// Sort jobs by execution count (descending)
+				type jobCount struct {
+					name  string
+					count int
+				}
+				sortedJobs := make([]jobCount, 0, len(jobCounts))
+				for job, count := range jobCounts {
+					sortedJobs = append(sortedJobs, jobCount{job, count})
+				}
+				sort.Slice(sortedJobs, func(i, j int) bool {
+					return sortedJobs[i].count > sortedJobs[j].count
+				})
+
+				for _, jc := range sortedJobs {
+					nodes := jobNodes[jc.name]
+					nodeList := make([]string, 0, len(nodes))
+					for node := range nodes {
+						nodeList = append(nodeList, node)
+					}
+					sort.Strings(nodeList)
+
+					// Get status summary for this job
+					succeeded := 0
+					failed := 0
+					running := 0
+					for _, exec := range executions {
+						if exec.JobName == jc.name {
+							switch exec.Status {
+							case "Succeeded":
+								succeeded++
+							case "Failed":
+								failed++
+							case "Running":
+								running++
+							}
+						}
+					}
+
+					statusSummary := fmt.Sprintf("✅ %d", succeeded)
+					if failed > 0 {
+						statusSummary += fmt.Sprintf(" ❌ %d", failed)
+					}
+					if running > 0 {
+						statusSummary += fmt.Sprintf(" ⏳ %d", running)
+					}
+
+					// Format node list
+					nodeStr := fmt.Sprintf("%d node(s)", len(nodes))
+					if len(nodes) <= 3 {
+						nodeStr = strings.Join(nodeList, ", ")
+					}
+
+					sb.WriteString(fmt.Sprintf("| `%s` | %d | %s | %s |\n",
+						jc.name, jc.count, nodeStr, statusSummary))
+				}
+				sb.WriteString("\n")
+
+				// Show detailed node distribution for high-frequency jobs
+				for _, jc := range sortedJobs {
+					if jc.count >= 5 { // Only show details for jobs that ran 5+ times
+						nodes := jobNodes[jc.name]
+						if len(nodes) > 1 {
+							// Recreate node list for this job
+							jobNodeList := make([]string, 0, len(nodes))
+							for node := range nodes {
+								jobNodeList = append(jobNodeList, node)
+							}
+							sort.Strings(jobNodeList)
+
+							sb.WriteString(fmt.Sprintf("**`%s` node distribution**:\n", jc.name))
+							for _, node := range jobNodeList {
+								if count := nodes[node]; count > 0 {
+									sb.WriteString(fmt.Sprintf("- %s: %d executions\n", node, count))
+								}
+							}
+							sb.WriteString("\n")
+						}
+					}
+				}
+			}
+
+			sb.WriteString("**Legend**: ✅ Succeeded | ❌ Failed | ⏳ Running\n\n")
+		}
 	}
 
 	sb.WriteString("### Recommended Resource Allocation Strategy\n\n")
@@ -710,6 +830,34 @@ func generateRabbitMQSection(analysis *Analysis) string {
 	sb.WriteString(fmt.Sprintf("- ✓ Priority Class Configured: %v\n", analysis.RabbitMQFindings.HasPriorityClass))
 	sb.WriteString(fmt.Sprintf("- ✓ Resource Limits Set: %v\n\n", analysis.RabbitMQFindings.HasResourceLimits))
 
+	// OOM Events in Last 7 Days
+	if len(analysis.RabbitMQFindings.OOMEventsLast7d) > 0 {
+		sb.WriteString("### ⚠️ OOM Events in Last 7 Days\n\n")
+		sb.WriteString(fmt.Sprintf("**Total OOM Events**: %d\n\n", len(analysis.RabbitMQFindings.OOMEventsLast7d)))
+
+		sb.WriteString("| Timestamp | Pod | Namespace | Node | Container |\n")
+		sb.WriteString("|-----------|-----|-----------|------|--------|\n")
+
+		for _, oom := range analysis.RabbitMQFindings.OOMEventsLast7d {
+			timeStr := oom.Timestamp.Format("2006-01-02 15:04:05")
+			container := oom.Container
+			if container == "" {
+				container = "N/A"
+			}
+			sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s |\n",
+				timeStr,
+				oom.PodName,
+				oom.Namespace,
+				oom.NodeName,
+				container))
+		}
+		sb.WriteString("\n")
+		sb.WriteString("⚠️ **Action Required**: RabbitMQ pods are experiencing OOM kills. Review and increase memory limits immediately.\n\n")
+	} else {
+		sb.WriteString("### ✅ OOM Events in Last 7 Days\n\n")
+		sb.WriteString("No OOM events detected for RabbitMQ pods in the last 7 days.\n\n")
+	}
+
 	sb.WriteString("### Recommendations for Maximum Stability\n\n")
 
 	sb.WriteString("#### 1. Create High-Priority PriorityClass\n\n")
@@ -785,9 +933,10 @@ func generatePodRestartsSection(analysis *Analysis) string {
 	sb.WriteString("## 5. Pod Restart Analysis\n\n")
 
 	total24h := analysis.PodRestarts.TotalPods24h
+	total48h := analysis.PodRestarts.TotalPods48h
 	total7d := analysis.PodRestarts.TotalPods7d
 
-	if total24h == 0 && total7d == 0 {
+	if total24h == 0 && total48h == 0 && total7d == 0 {
 		sb.WriteString("✅ No pod restarts detected in the last 7 days.\n\n")
 		return sb.String()
 	}
@@ -796,6 +945,8 @@ func generatePodRestartsSection(analysis *Analysis) string {
 	sb.WriteString("### Summary\n\n")
 	sb.WriteString(fmt.Sprintf("- **Last 24 Hours**: %d pods with restarts (%d total restarts)\n",
 		total24h, len(analysis.PodRestarts.Last24Hours)))
+	sb.WriteString(fmt.Sprintf("- **Last 48 Hours**: %d pods with restarts (%d total restarts)\n",
+		total48h, len(analysis.PodRestarts.Last48Hours)))
 	sb.WriteString(fmt.Sprintf("- **Last 7 Days**: %d pods with restarts (%d total restarts)\n\n",
 		total7d, len(analysis.PodRestarts.Last7Days)))
 
@@ -834,9 +985,9 @@ func generatePodRestartsSection(analysis *Analysis) string {
 		sb.WriteString("\n")
 	}
 
-	// Last 7 Days (excluding 24h ones already shown)
-	if len(analysis.PodRestarts.Last7Days) > len(analysis.PodRestarts.Last24Hours) {
-		sb.WriteString("### Additional Restarts in Last 7 Days (excluding above)\n\n")
+	// Last 48 Hours (excluding 24h ones already shown)
+	if len(analysis.PodRestarts.Last48Hours) > len(analysis.PodRestarts.Last24Hours) {
+		sb.WriteString("### Restarts in Last 48 Hours (excluding above)\n\n")
 
 		// Create map of 24h restarts to exclude
 		recent := make(map[string]bool)
@@ -846,7 +997,7 @@ func generatePodRestartsSection(analysis *Analysis) string {
 
 		// Filter out recent ones
 		older := []PodRestart{}
-		for _, r := range analysis.PodRestarts.Last7Days {
+		for _, r := range analysis.PodRestarts.Last48Hours {
 			key := r.Namespace + "/" + r.PodName + "/" + r.ContainerName
 			if !recent[key] {
 				older = append(older, r)
@@ -882,6 +1033,39 @@ func generatePodRestartsSection(analysis *Analysis) string {
 			}
 			sb.WriteString("\n")
 		}
+	}
+
+	// All Restarts in Last 7 Days
+	if len(analysis.PodRestarts.Last7Days) > 0 {
+		sb.WriteString("### All Restarts in the Last 7 Days\n\n")
+
+		if len(analysis.PodRestarts.Last7Days) > 20 {
+			sb.WriteString(fmt.Sprintf("Showing top 20 of %d containers:\n\n", len(analysis.PodRestarts.Last7Days)))
+		}
+
+		sb.WriteString("| Namespace | Pod | Container | Restart Count | Last Restart | Reason |\n")
+		sb.WriteString("|-----------|-----|-----------|---------------|--------------|--------|\n")
+
+		for i, restart := range analysis.PodRestarts.Last7Days {
+			if i >= 20 {
+				sb.WriteString(fmt.Sprintf("\n_... and %d more containers_\n\n", len(analysis.PodRestarts.Last7Days)-20))
+				break
+			}
+
+			timeStr := "Unknown"
+			if !restart.LastRestartTime.IsZero() {
+				timeStr = restart.LastRestartTime.Format("2006-01-02 15:04")
+			}
+
+			sb.WriteString(fmt.Sprintf("| %s | %s | %s | %d | %s | %s |\n",
+				restart.Namespace,
+				restart.PodName,
+				restart.ContainerName,
+				restart.RestartCount,
+				timeStr,
+				restart.Reason))
+		}
+		sb.WriteString("\n")
 	}
 
 	// Analysis and recommendations

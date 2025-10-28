@@ -106,6 +106,7 @@ type RabbitMQAnalysis struct {
 	HasPriorityClass  bool
 	HasResourceLimits bool
 	Recommendations   []string
+	OOMEventsLast7d   []OOMEvent
 }
 
 type JobAnalysis struct {
@@ -113,6 +114,18 @@ type JobAnalysis struct {
 	TotalJobs         int
 	ImpactOnStability string
 	Recommendations   []string
+	JobExecutions     map[string][]JobExecution // namespace -> job executions
+}
+
+type JobExecution struct {
+	Namespace      string
+	JobName        string
+	PodName        string
+	NodeName       string
+	StartTime      time.Time
+	CompletionTime time.Time
+	Duration       time.Duration
+	Status         string
 }
 
 type PodRestart struct {
@@ -126,8 +139,10 @@ type PodRestart struct {
 
 type PodRestartAnalysis struct {
 	Last24Hours  []PodRestart
+	Last48Hours  []PodRestart
 	Last7Days    []PodRestart
 	TotalPods24h int
+	TotalPods48h int
 	TotalPods7d  int
 }
 
@@ -271,7 +286,7 @@ func (a *Analyzer) AnalyzeCluster(data *ClusterData) *Analysis {
 	analysis.NamespaceAnalysis = a.analyzeNamespaces(data.Pods, data.Namespaces)
 
 	// Analyze RabbitMQ
-	analysis.RabbitMQFindings = a.analyzeRabbitMQ(data.Pods)
+	analysis.RabbitMQFindings = a.analyzeRabbitMQ(data.Pods, data.Events)
 
 	// Analyze short-lived jobs
 	analysis.ShortLivedJobs = a.analyzeJobs(data.Pods)
@@ -300,11 +315,13 @@ func (a *Analyzer) AnalyzeCluster(data *ClusterData) *Analysis {
 func (a *Analyzer) analyzePodRestarts(pods []corev1.Pod) PodRestartAnalysis {
 	analysis := PodRestartAnalysis{
 		Last24Hours: []PodRestart{},
+		Last48Hours: []PodRestart{},
 		Last7Days:   []PodRestart{},
 	}
 
 	now := time.Now()
 	threshold24h := now.Add(-24 * time.Hour)
+	threshold48h := now.Add(-48 * time.Hour)
 	threshold7d := now.Add(-7 * 24 * time.Hour)
 
 	for _, pod := range pods {
@@ -348,6 +365,11 @@ func (a *Analyzer) analyzePodRestarts(pods []corev1.Pod) PodRestartAnalysis {
 					analysis.Last24Hours = append(analysis.Last24Hours, restart)
 				}
 
+				// Add to 48h list if within last 48 hours
+				if !lastRestartTime.IsZero() && lastRestartTime.After(threshold48h) {
+					analysis.Last48Hours = append(analysis.Last48Hours, restart)
+				}
+
 				// Add to 7d list if within last 7 days
 				if !lastRestartTime.IsZero() && lastRestartTime.After(threshold7d) {
 					analysis.Last7Days = append(analysis.Last7Days, restart)
@@ -361,6 +383,10 @@ func (a *Analyzer) analyzePodRestarts(pods []corev1.Pod) PodRestartAnalysis {
 		return analysis.Last24Hours[i].RestartCount > analysis.Last24Hours[j].RestartCount
 	})
 
+	sort.Slice(analysis.Last48Hours, func(i, j int) bool {
+		return analysis.Last48Hours[i].RestartCount > analysis.Last48Hours[j].RestartCount
+	})
+
 	sort.Slice(analysis.Last7Days, func(i, j int) bool {
 		return analysis.Last7Days[i].RestartCount > analysis.Last7Days[j].RestartCount
 	})
@@ -371,6 +397,12 @@ func (a *Analyzer) analyzePodRestarts(pods []corev1.Pod) PodRestartAnalysis {
 		uniquePods24h[r.Namespace+"/"+r.PodName] = true
 	}
 	analysis.TotalPods24h = len(uniquePods24h)
+
+	uniquePods48h := make(map[string]bool)
+	for _, r := range analysis.Last48Hours {
+		uniquePods48h[r.Namespace+"/"+r.PodName] = true
+	}
+	analysis.TotalPods48h = len(uniquePods48h)
 
 	uniquePods7d := make(map[string]bool)
 	for _, r := range analysis.Last7Days {
@@ -776,17 +808,26 @@ func (a *Analyzer) analyzeNamespaces(pods []corev1.Pod, namespaces []corev1.Name
 	return result
 }
 
-func (a *Analyzer) analyzeRabbitMQ(pods []corev1.Pod) RabbitMQAnalysis {
+func (a *Analyzer) analyzeRabbitMQ(pods []corev1.Pod, events []corev1.Event) RabbitMQAnalysis {
 	analysis := RabbitMQAnalysis{
 		RabbitMQPods:    []string{},
 		Recommendations: []string{},
+		OOMEventsLast7d: []OOMEvent{},
 	}
 
+	now := time.Now()
+	threshold7d := now.Add(-7 * 24 * time.Hour)
+
+	// Find RabbitMQ pods
+	rabbitmqPodNames := make(map[string]bool)
 	for _, pod := range pods {
 		if strings.Contains(pod.Name, "rabbitmq") ||
 			strings.Contains(strings.ToLower(pod.Name), "rabbit") {
 			analysis.RabbitMQPods = append(analysis.RabbitMQPods,
 				fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+
+			// Store pod names for OOM filtering
+			rabbitmqPodNames[pod.Namespace+"/"+pod.Name] = true
 
 			// Check priority class
 			if pod.Spec.PriorityClassName != "" {
@@ -804,17 +845,76 @@ func (a *Analyzer) analyzeRabbitMQ(pods []corev1.Pod) RabbitMQAnalysis {
 		}
 	}
 
+	// Filter OOM events for RabbitMQ pods in last 7 days
+	for _, event := range events {
+		if strings.Contains(event.Reason, "OOMKilled") ||
+			strings.Contains(event.Message, "OOMKilled") {
+
+			podKey := event.InvolvedObject.Namespace + "/" + event.InvolvedObject.Name
+
+			// Check if this is a RabbitMQ pod and within last 7 days
+			if rabbitmqPodNames[podKey] && event.LastTimestamp.Time.After(threshold7d) {
+				analysis.OOMEventsLast7d = append(analysis.OOMEventsLast7d, OOMEvent{
+					NodeName:  event.Source.Host,
+					PodName:   event.InvolvedObject.Name,
+					Namespace: event.InvolvedObject.Namespace,
+					Container: event.InvolvedObject.FieldPath,
+					Timestamp: event.LastTimestamp.Time,
+					Reason:    event.Reason,
+				})
+			}
+		}
+	}
+
+	// Sort OOM events by timestamp, most recent first
+	sort.Slice(analysis.OOMEventsLast7d, func(i, j int) bool {
+		return analysis.OOMEventsLast7d[i].Timestamp.After(analysis.OOMEventsLast7d[j].Timestamp)
+	})
+
 	return analysis
 }
 
 func (a *Analyzer) analyzeJobs(pods []corev1.Pod) JobAnalysis {
-	analysis := JobAnalysis{}
+	analysis := JobAnalysis{
+		JobExecutions: make(map[string][]JobExecution),
+	}
+
+	now := time.Now()
+	last24Hours := now.Add(-24 * time.Hour)
 
 	for _, pod := range pods {
 		if pod.OwnerReferences != nil {
 			for _, owner := range pod.OwnerReferences {
 				if owner.Kind == "Job" {
 					analysis.TotalJobs++
+
+					// Track job execution details for last 24 hours
+					if pod.Status.StartTime != nil && pod.Status.StartTime.Time.After(last24Hours) {
+						execution := JobExecution{
+							Namespace: pod.Namespace,
+							JobName:   owner.Name,
+							PodName:   pod.Name,
+							NodeName:  pod.Spec.NodeName,
+							StartTime: pod.Status.StartTime.Time,
+							Status:    string(pod.Status.Phase),
+						}
+
+						// Calculate duration if completed
+						if pod.Status.Phase == "Succeeded" || pod.Status.Phase == "Failed" {
+							if pod.Status.ContainerStatuses != nil {
+								for _, cs := range pod.Status.ContainerStatuses {
+									if cs.State.Terminated != nil {
+										execution.CompletionTime = cs.State.Terminated.FinishedAt.Time
+										execution.Duration = execution.CompletionTime.Sub(execution.StartTime)
+										break
+									}
+								}
+							}
+						}
+
+						// Add to namespace map
+						analysis.JobExecutions[pod.Namespace] = append(analysis.JobExecutions[pod.Namespace], execution)
+					}
 
 					// Check if short-lived (completed in < 2 minutes)
 					if pod.Status.Phase == "Succeeded" &&
@@ -1052,9 +1152,38 @@ func (a *Analyzer) getClusterName(ctx context.Context) string {
 		if name, ok := node.Labels["alpha.eksctl.io/cluster-name"]; ok {
 			return name
 		}
+
+		// For AKS, the cluster name might be in various places
+		// Try kubernetes.azure.com/cluster - but clean it if it has Nodes_ prefix
 		if name, ok := node.Labels["kubernetes.azure.com/cluster"]; ok {
-			return name
+			// Remove "Nodes_" prefix if present (common in AKS resource groups)
+			cleanName := strings.TrimPrefix(name, "Nodes_")
+			cleanName = strings.TrimPrefix(cleanName, "MC_")
+			return cleanName
 		}
+
+		// Try to extract from providerId (format: azure:///subscriptions/.../resourceGroups/.../providers/.../virtualMachines/...)
+		if node.Spec.ProviderID != "" {
+			parts := strings.Split(node.Spec.ProviderID, "/")
+			for i, part := range parts {
+				if part == "resourceGroups" && i+1 < len(parts) {
+					rg := parts[i+1]
+					// AKS resource groups typically follow pattern: MC_<resourcegroup>_<clustername>_<region>
+					// or Nodes_<clustername> for node pools
+					if strings.HasPrefix(rg, "MC_") {
+						rgParts := strings.Split(rg, "_")
+						if len(rgParts) >= 3 {
+							return rgParts[2] // cluster name is typically the 3rd part
+						}
+					}
+					if strings.HasPrefix(rg, "Nodes_") {
+						return strings.TrimPrefix(rg, "Nodes_")
+					}
+					return rg
+				}
+			}
+		}
+
 		// AKS cluster name from node resource group
 		if rg, ok := node.Labels["kubernetes.azure.com/node-pool-name"]; ok {
 			return "AKS-" + rg
